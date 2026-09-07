@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LBC Seller-Trust Filter
 // @namespace    https://github.com/theo-bnts
-// @version      1.9.0
-// @description  Hides Leboncoin ads from young, poorly rated or low-review sellers and removes sponsored content
+// @version      2.0.0
+// @description  Filters Leboncoin ads by seller trust, removes sponsored content and classifies listing prices
 // @match        https://www.leboncoin.fr/*
 // @run-at       document-idle
 // @grant        GM_getValue
@@ -21,12 +21,14 @@
   // ---------------------------------------------------------------------
   const MS_IN_DAY = 86_400_000;
   const MAX_CONCURRENT = 4;
+  const MIN_PRICES_FOR_CLASSIFICATION = 9;
 
   const CARD_SELECTOR = '[data-qa-id="aditem_container"]';
   const AD_LINK_SELECTOR = 'a[href*="/ad/"]';
 
   const SELLER_HIDDEN_CLASS = "lbc-trust-seller-hidden";
   const NON_LISTING_HIDDEN_CLASS = "lbc-trust-non-listing-hidden";
+  const PRICE_LABEL_CLASS = "lbc-trust-price-label";
 
   // ---------------------------------------------------------------------
   // Styles
@@ -36,6 +38,12 @@
     .${SELLER_HIDDEN_CLASS},
     .${NON_LISTING_HIDDEN_CLASS} {
       display: none !important;
+    }
+
+    .${PRICE_LABEL_CLASS} {
+      margin-left: 4px;
+      font-size: inherit;
+      font-weight: 600;
     }
   `;
   document.head.appendChild(style);
@@ -317,6 +325,16 @@
     item.classList.toggle(SELLER_HIDDEN_CLASS, hidden);
   }
 
+  function isCardVisible(card) {
+    const item = getCardItem(card);
+
+    return (
+      card.isConnected &&
+      !item.classList.contains(SELLER_HIDDEN_CLASS) &&
+      !item.classList.contains(NON_LISTING_HIDDEN_CLASS)
+    );
+  }
+
   // Leboncoin inserts several non-listing <li> elements between real ads:
   // sponsored blocks, empty placeholders, video ads, logos, etc.
   // Real classified items contain an "/ad/" link, so non-listing items can
@@ -349,6 +367,200 @@
   }
 
   // ---------------------------------------------------------------------
+  // Price classification
+  // ---------------------------------------------------------------------
+  function parsePrice(text) {
+    const match = text.match(
+      /(\d[\d\s\u00A0\u202F]*(?:[.,]\d{1,2})?)\s*€/
+    );
+
+    if (!match) return null;
+
+    const value = Number(
+      match[1]
+        .replace(/[\s\u00A0\u202F]/g, "")
+        .replace(",", ".")
+    );
+
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function getCardPrice(card) {
+    const accessiblePrice = Array.from(card.querySelectorAll("p")).find(p => {
+      return /^Prix\s*:/i.test(p.textContent.trim());
+    });
+
+    if (accessiblePrice) {
+      const price = parsePrice(accessiblePrice.textContent);
+
+      if (price !== null) {
+        return price;
+      }
+    }
+
+    const testPrice = card.querySelector('p[data-test-id="price"]');
+
+    if (testPrice) {
+      const price = parsePrice(testPrice.textContent);
+
+      if (price !== null) {
+        return price;
+      }
+    }
+
+    const visiblePrice = Array.from(card.querySelectorAll("p")).find(p => {
+      const text = p.textContent.trim();
+
+      return (
+        /€/.test(text) &&
+        !/^Prix\s*:/i.test(text) &&
+        !/^dès\s+/i.test(text)
+      );
+    });
+
+    return visiblePrice
+      ? parsePrice(visiblePrice.textContent)
+      : null;
+  }
+
+  function getVisiblePriceElement(card) {
+    const testPrice = card.querySelector('p[data-test-id="price"]');
+
+    if (testPrice) {
+      return testPrice;
+    }
+
+    return Array.from(card.querySelectorAll("p")).find(p => {
+      const text = p.textContent.trim();
+
+      return (
+        /€/.test(text) &&
+        !/^Prix\s*:/i.test(text) &&
+        !/^dès\s+/i.test(text) &&
+        !p.classList.contains("sr-only")
+      );
+    }) || null;
+  }
+
+  function percentile(sortedValues, percentileValue) {
+    if (sortedValues.length === 0) return null;
+
+    const index = (sortedValues.length - 1) * percentileValue;
+    const lower = Math.floor(index);
+    const upper = Math.ceil(index);
+
+    if (lower === upper) {
+      return sortedValues[lower];
+    }
+
+    const weight = index - lower;
+
+    return (
+      sortedValues[lower] * (1 - weight) +
+      sortedValues[upper] * weight
+    );
+  }
+
+  function setPriceLabel(card, label) {
+    const existing = card.querySelector(`.${PRICE_LABEL_CLASS}`);
+
+    if (!label) {
+      existing?.remove();
+      return;
+    }
+
+    if (existing) {
+      const nextText = `(${label})`;
+
+      if (existing.textContent !== nextText) {
+        existing.textContent = nextText;
+      }
+
+      return;
+    }
+
+    const priceElement = getVisiblePriceElement(card);
+    if (!priceElement) return;
+
+    const marker = document.createElement("span");
+    marker.className = PRICE_LABEL_CLASS;
+    marker.textContent = `(${label})`;
+
+    priceElement.appendChild(marker);
+  }
+
+  let pendingEvaluations = 0;
+  let priceClassificationTimer = null;
+
+  function classifyVisiblePrices() {
+    if (!isSearchPage()) return;
+    if (pendingEvaluations !== 0) return;
+
+    const cards = Array.from(document.querySelectorAll(CARD_SELECTOR));
+
+    const pricedCards = cards
+      .filter(isCardVisible)
+      .map(card => ({
+        card,
+        price: getCardPrice(card)
+      }))
+      .filter(entry => entry.price !== null);
+
+    if (pricedCards.length < MIN_PRICES_FOR_CLASSIFICATION) {
+      cards.forEach(card => setPriceLabel(card, null));
+      return;
+    }
+
+    const prices = pricedCards
+      .map(entry => entry.price)
+      .sort((a, b) => a - b);
+
+    const p33 = percentile(prices, 0.33);
+    const p66 = percentile(prices, 0.66);
+
+    if (p33 === null || p66 === null) {
+      cards.forEach(card => setPriceLabel(card, null));
+      return;
+    }
+
+    const pricedCardSet = new Set(
+      pricedCards.map(entry => entry.card)
+    );
+
+    cards.forEach(card => {
+      if (!pricedCardSet.has(card)) {
+        setPriceLabel(card, null);
+      }
+    });
+
+    pricedCards.forEach(({ card, price }) => {
+      let label;
+
+      if (p33 === p66) {
+        label = "Normal";
+      } else if (price < p33) {
+        label = "Bon";
+      } else if (price < p66) {
+        label = "Normal";
+      } else {
+        label = "Cher";
+      }
+
+      setPriceLabel(card, label);
+    });
+  }
+
+  function schedulePriceClassification() {
+    clearTimeout(priceClassificationTimer);
+
+    priceClassificationTimer = setTimeout(() => {
+      if (pendingEvaluations === 0) {
+        classifyVisiblePrices();
+      }
+    }, 150);
+  }
+
+  // ---------------------------------------------------------------------
   // Ad-card processing
   // ---------------------------------------------------------------------
   const processedCards = new WeakMap(); // card -> listId
@@ -368,9 +580,22 @@
 
     processedCards.set(card, listId);
 
-    // Clear a verdict that may belong to a previous listing rendered
+    // Clear state that may belong to a previous listing rendered
     // inside the same DOM node.
     setCardHidden(card, false);
+    setPriceLabel(card, null);
+
+    // If every seller filter is disabled, no seller API lookup is needed.
+    if (
+      monthsThreshold === 0 &&
+      minRating === 0 &&
+      minReviews === 0
+    ) {
+      schedulePriceClassification();
+      return;
+    }
+
+    pendingEvaluations++;
 
     try {
       const data = await getClassified(listId);
@@ -387,6 +612,9 @@
     } catch (err) {
       processedCards.delete(card);
       logFetchFailure(err);
+    } finally {
+      pendingEvaluations--;
+      schedulePriceClassification();
     }
   }
 
@@ -395,6 +623,7 @@
 
     document.querySelectorAll(CARD_SELECTOR).forEach(processNode);
     filterNonListingItems();
+    schedulePriceClassification();
   }
 
   // ---------------------------------------------------------------------
@@ -424,6 +653,7 @@
     });
 
     filterNonListingItems();
+    schedulePriceClassification();
   }).observe(document.body, {
     childList: true,
     subtree: true
