@@ -85,8 +85,6 @@ The script also removes `<li>` elements inside the search results that do not co
 normal `/ad/` listing link. This removes sponsored content and prevents empty gaps from
 remaining between visible ads.
 
-Full behavioral specification: [docs/SPEC.md](docs/SPEC.md).
-
 ## Limitations
 
 - Only active on `leboncoin.fr/recherche*` search pages — not ad detail pages, profiles,
