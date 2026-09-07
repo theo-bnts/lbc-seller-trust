@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LBC Seller-Trust Filter
 // @namespace    https://github.com/theo-bnts
-// @version      1.8.0
+// @version      1.9.0
 // @description  Hides Leboncoin ads from young, poorly rated or low-review sellers and removes sponsored content
 // @match        https://www.leboncoin.fr/*
 // @run-at       document-idle
@@ -49,7 +49,7 @@
 
   GM_registerMenuCommand("Set age threshold (months)…", () => {
     const input = prompt(
-      "Hide sellers registered less than how many months ago?",
+      "Hide sellers registered less than how many months ago?\nSet 0 to disable this filter.",
       String(monthsThreshold)
     );
     if (input === null) return;
@@ -57,7 +57,7 @@
     const parsed = Number(input);
     if (!Number.isFinite(parsed)) return;
 
-    const next = Math.max(1, Math.min(36, Math.round(parsed)));
+    const next = Math.max(0, Math.min(36, Math.round(parsed)));
 
     monthsThreshold = next;
     GM_setValue("monthsThreshold", next);
@@ -67,7 +67,7 @@
 
   GM_registerMenuCommand("Set minimum rating…", () => {
     const input = prompt(
-      "Hide sellers rated below what score out of 5?",
+      "Hide sellers rated below what score out of 5?\nSet 0 to disable this filter.",
       String(minRating)
     );
     if (input === null) return;
@@ -85,7 +85,7 @@
 
   GM_registerMenuCommand("Set minimum reviews…", () => {
     const input = prompt(
-      "Hide sellers with fewer than how many reviews?",
+      "Hide sellers with fewer than how many reviews?\nSet 0 to disable this filter.",
       String(minReviews)
     );
     if (input === null) return;
@@ -253,7 +253,10 @@
 
       try {
         const userInfo = await getUserInfo(userId);
-        const ageOk = computeAgeOk(userInfo.registered_at);
+
+        const ageOk =
+          monthsThreshold === 0 ||
+          computeAgeOk(userInfo.registered_at);
 
         const overallScore = Number(userInfo.feedback?.overall_score);
         const receivedCount = Number(userInfo.feedback?.received_count);
@@ -267,10 +270,11 @@
           : 0;
 
         const ratingOk =
-          rating !== null &&
-          rating >= minRating;
+          minRating === 0 ||
+          (rating !== null && rating >= minRating);
 
         const reviewsOk =
+          minReviews === 0 ||
           reviewCount >= minReviews;
 
         const hide =
