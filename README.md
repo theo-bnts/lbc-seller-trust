@@ -17,12 +17,15 @@ results.
 
 ## What it does
 
-On `leboncoin.fr` search pages, each ad card's seller is checked against three signals:
+On `leboncoin.fr` search pages, each ad card's seller is checked against three configurable
+signals:
 
 - **Account age** — seller must have been registered for at least a configurable number
   of months (default 6).
-- **Seller rating** — seller must have a rating of at least **4.5 / 5**.
-- **Review count** — seller must have received at least **3 reviews**.
+- **Seller rating** — seller must have a rating of at least a configurable score
+  (default **4.5 / 5**).
+- **Review count** — seller must have received at least a configurable number of reviews
+  (default **3**).
 
 If any of these checks fail, the entire ad is hidden from the search results.
 
@@ -39,20 +42,18 @@ No badges or additional information are added to visible ads.
 
 ## Configuration
 
-One setting is editable via the Tampermonkey menu on the script:
+All seller-trust thresholds are editable from the Tampermonkey menu for the script:
 
-| Setting                     | Range | Default |
-| --------------------------- | ----- | ------- |
-| Set age threshold (months)… | 1–36  | 6       |
+| Setting                     | Range    | Default |
+| --------------------------- | -------- | ------- |
+| Set age threshold (months)… | 1–36     | 6       |
+| Set minimum rating…         | 0–5      | 4.5     |
+| Set minimum reviews…        | 0–10,000 | 3       |
 
-Changing the age threshold reloads the page so all visible listings are evaluated again.
+The minimum rating can be configured in increments of `0.1`.
 
-The rating and review thresholds are currently defined directly in the script:
-
-| Setting        | Default |
-| -------------- | ------- |
-| Minimum rating | 4.5 / 5 |
-| Minimum reviews | 3      |
+Changing any setting reloads the page so all visible listings are evaluated again using
+the new thresholds.
 
 ## How it works
 
@@ -66,16 +67,16 @@ It then fetches the seller profile through the internal `user-card` API and read
 - `feedback.received_count`
 
 Leboncoin's `overall_score` value is normalized from `0` to `1`, so the script converts
-it to a 5-star rating before applying the minimum rating threshold.
+it to a 5-star rating before applying the configured minimum rating threshold.
 
 Seller profile lookups and classified lookups are cached in memory for the current page
 session to avoid repeating the same API requests unnecessarily.
 
 Listings are hidden when:
 
-- the seller account is too recent;
-- the seller has fewer than 3 reviews;
-- the seller rating is below 4.5 / 5;
+- the seller account is newer than the configured age threshold;
+- the seller has fewer than the configured minimum number of reviews;
+- the seller rating is below the configured minimum rating;
 - or the seller rating is unavailable.
 
 If an API request fails, the script fails open and leaves the listing visible.
@@ -91,7 +92,6 @@ Full behavioral specification: [docs/SPEC.md](docs/SPEC.md).
 - Only active on `leboncoin.fr/recherche*` search pages — not ad detail pages, profiles,
   favorites, or messaging.
 - No options page or popup — configuration is menu-only.
-- Rating and review thresholds are currently hard-coded.
 - Trust verdicts and API responses are cached in memory for the page session only;
   nothing persists across reloads.
 - The script relies on undocumented Leboncoin internal APIs and DOM structure, which may
