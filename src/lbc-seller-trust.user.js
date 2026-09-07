@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LBC Seller-Trust Flag
 // @namespace    https://github.com/gushmazuko
-// @version      1.2.0
-// @description  Flags Leboncoin ads from young or multi-listing sellers
+// @version      1.3.0
+// @description  Flags Leboncoin ads from young sellers and displays seller ratings
 // @match        https://www.leboncoin.fr/*
 // @run-at       document-idle
 // @grant        GM_getValue
@@ -40,21 +40,6 @@
     const next = Math.max(1, Math.min(36, Number(input) || monthsThreshold));
     monthsThreshold = next;
     GM_setValue("monthsThreshold", next);
-  });
-
-  // owner_listing excludes the viewed ad itself (see response.pivot.exclude_ids),
-  // so this counts OTHER ads only — >=1 other ad means >=2 total in the category.
-  let multiListingMin = GM_getValue("multiListingMin", 1);
-
-  GM_registerMenuCommand("Set multi-listing threshold (ads)…", () => {
-    const input = prompt(
-      "Flag sellers with how many other ads in the same category?",
-      String(multiListingMin)
-    );
-    if (input === null) return;
-    const next = Math.max(1, Math.min(10, Number(input) || multiListingMin));
-    multiListingMin = next;
-    GM_setValue("multiListingMin", next);
   });
 
   // ---------------------------------------------------------------------
@@ -136,20 +121,20 @@
     }
   }
 
-  // Per-user memoised age lookup: caching the promise gives in-flight
+  // Per-user memoised profile lookup: caching the promise gives in-flight
   // dedupe for free. Failed lookups are evicted so a later retry can
   // succeed instead of being stuck on a cached rejection.
-  const registeredAtCache = new Map(); // userId -> Promise<string>
+  const userInfoCache = new Map(); // userId -> Promise<object>
 
-  function getRegisteredAt(userId) {
-    if (!registeredAtCache.has(userId)) {
+  function getUserInfo(userId) {
+    if (!userInfoCache.has(userId)) {
       const promise = fetchJson(
         `https://api.leboncoin.fr/api/user-card/v1/${encodeURIComponent(userId)}/infos`
-      ).then(data => data.registered_at);
-      promise.catch(() => registeredAtCache.delete(userId));
-      registeredAtCache.set(userId, promise);
+      );
+      promise.catch(() => userInfoCache.delete(userId));
+      userInfoCache.set(userId, promise);
     }
-    return registeredAtCache.get(userId);
+    return userInfoCache.get(userId);
   }
 
   function computeAgeOk(registeredAt) {
@@ -160,28 +145,11 @@
     return Date.now() - registeredMs >= monthsThreshold * 30.4375 * MS_IN_DAY;
   }
 
-  async function getSameCategoryCount(userId, listId, categoryId) {
-    const data = await fetchJson(
-      "https://api.leboncoin.fr/api/adfinder/v1/owner_listing",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          owner_user_id: userId,
-          displayed_id: Number(listId),
-          limit: 2,
-          category_id: Number(categoryId)
-        })
-      }
-    );
-    return data.aggregations?.category_id?.[categoryId] ?? 0;
-  }
+  const verdictCache = new Map(); // userId -> { trusted, reasons, rating, reviewCount }
+  const inFlight = new Map(); // userId -> Promise<{ trusted, reasons, rating, reviewCount }>
 
-  const verdictCache = new Map(); // "userId::listId::categoryId" -> { trusted, reasons }
-  const inFlight = new Map(); // same key -> Promise<{ trusted, reasons }>
-
-  function evaluateSeller({ userId, listId, categoryId }) {
-    const key = `${userId}::${listId}::${categoryId}`;
+  function evaluateSeller({ userId }) {
+    const key = userId;
 
     if (verdictCache.has(key)) return Promise.resolve(verdictCache.get(key));
     if (inFlight.has(key)) return inFlight.get(key);
@@ -189,24 +157,39 @@
     const promise = (async () => {
       await evalSemaphore.acquire();
       try {
-        const registeredAt = await getRegisteredAt(userId);
-        const ageOk = computeAgeOk(registeredAt);
+        const userInfo = await getUserInfo(userId);
+        const ageOk = computeAgeOk(userInfo.registered_at);
 
-        let multi = false;
-        if (categoryId) {
-          const sameCatCount = await getSameCategoryCount(userId, listId, categoryId);
-          multi = sameCatCount >= multiListingMin;
-        }
+        const overallScore = Number(userInfo.feedback?.overall_score);
+        const receivedCount = Number(userInfo.feedback?.received_count);
+
+        const rating = Number.isFinite(overallScore)
+          ? Math.max(0, Math.min(5, overallScore * 5))
+          : null;
+
+        const reviewCount = Number.isFinite(receivedCount)
+          ? receivedCount
+          : 0;
 
         const reasons = [];
         if (!ageOk) reasons.push("young");
-        if (multi) reasons.push("multi");
-        const result = { trusted: reasons.length === 0, reasons };
+
+        const result = {
+          trusted: reasons.length === 0,
+          reasons,
+          rating,
+          reviewCount
+        };
         verdictCache.set(key, result);
         return result;
       } catch (err) {
         logFetchFailure(err);
-        return { trusted: true, reasons: [] }; // fail-open — not cached, SPEC §5.5
+        return {
+          trusted: true,
+          reasons: [],
+          rating: null,
+          reviewCount: 0
+        }; // fail-open — not cached, SPEC §5.5
       } finally {
         evalSemaphore.release();
         inFlight.delete(key);
@@ -218,20 +201,18 @@
   }
 
   // ---------------------------------------------------------------------
-  // DOM layer — ad-card discovery and badge (SPEC §6)
+  // DOM layer — ad-card discovery and badges (SPEC §6)
   // ---------------------------------------------------------------------
   function isSearchPage() {
     return location.pathname.startsWith("/recherche");
   }
 
   const REASON_LABEL = {
-    young: "new",
-    multi: "multi-listing"
+    young: "new"
   };
 
   const REASON_TEXT = {
-    young: () => `new account (< ${monthsThreshold} months)`,
-    multi: () => `multiple listings in this category`
+    young: () => `new account (< ${monthsThreshold} months)`
   };
 
   function addBadge(card, reasons) {
@@ -261,6 +242,36 @@
     priceEl.appendChild(badge);
   }
 
+  function addRating(card, rating, reviewCount) {
+    if (!card.isConnected) return;
+    if (rating === null) return;
+    if (card.querySelector(".lbc-seller-rating")) return;
+
+    const badge = document.createElement("div");
+    const formattedRating = rating.toFixed(1).replace(".", ",");
+    badge.textContent = `★ ${formattedRating}/5 (${reviewCount} avis)`;
+    badge.className = "lbc-seller-rating";
+    badge.title = `Seller rating: ${formattedRating}/5 from ${reviewCount} review${reviewCount > 1 ? "s" : ""}`;
+    Object.assign(badge.style, {
+      color: "#1a1a1a",
+      background: "#f2f2f2",
+      fontSize: "12px",
+      fontWeight: "600",
+      padding: "2px 6px",
+      borderRadius: "4px",
+      display: "inline-block",
+      marginLeft: "4px"
+    });
+
+    const flexContainer = card.querySelector(BADGE_CONTAINER_SELECTOR);
+    if (flexContainer) {
+      flexContainer.appendChild(badge);
+      return;
+    }
+    const priceEl = card.querySelector(PRICE_SELECTOR) || card;
+    priceEl.appendChild(badge);
+  }
+
   const seen = new WeakSet();
 
   function processNode(card) {
@@ -273,15 +284,15 @@
     const listId = link.pathname.split("/").pop();
     if (!/^\d+$/.test(listId)) return;
 
-    const urlCategoryId = new URL(location.href).searchParams.get("category") || "";
-
     fetchJson(`https://api.leboncoin.fr/finder/classified/${listId}`)
       .then(data => {
         const { owner } = data;
         if (!owner?.user_id) return;
-        const categoryId = String(data.category_id ?? "") || urlCategoryId;
-        return evaluateSeller({ userId: owner.user_id, listId, categoryId }).then(
-          ({ trusted, reasons }) => {
+
+        return evaluateSeller({ userId: owner.user_id }).then(
+          ({ trusted, reasons, rating, reviewCount }) => {
+            addRating(card, rating, reviewCount);
+
             if (!trusted) addBadge(card, reasons);
           }
         );
