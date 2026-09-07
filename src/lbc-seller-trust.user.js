@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LBC Seller-Trust Filter
 // @namespace    https://github.com/theo-bnts
-// @version      1.7.0
+// @version      1.8.0
 // @description  Hides Leboncoin ads from young, poorly rated or low-review sellers and removes sponsored content
 // @match        https://www.leboncoin.fr/*
 // @run-at       document-idle
@@ -28,9 +28,6 @@
   const SELLER_HIDDEN_CLASS = "lbc-trust-seller-hidden";
   const NON_LISTING_HIDDEN_CLASS = "lbc-trust-non-listing-hidden";
 
-  const MIN_RATING = 4.5;
-  const MIN_REVIEWS = 3;
-
   // ---------------------------------------------------------------------
   // Styles
   // ---------------------------------------------------------------------
@@ -47,6 +44,8 @@
   // Settings
   // ---------------------------------------------------------------------
   let monthsThreshold = GM_getValue("monthsThreshold", 6);
+  let minRating = GM_getValue("minRating", 4.5);
+  let minReviews = GM_getValue("minReviews", 3);
 
   GM_registerMenuCommand("Set age threshold (months)…", () => {
     const input = prompt(
@@ -55,9 +54,49 @@
     );
     if (input === null) return;
 
-    const next = Math.max(1, Math.min(36, Number(input) || monthsThreshold));
+    const parsed = Number(input);
+    if (!Number.isFinite(parsed)) return;
+
+    const next = Math.max(1, Math.min(36, Math.round(parsed)));
+
     monthsThreshold = next;
     GM_setValue("monthsThreshold", next);
+
+    location.reload();
+  });
+
+  GM_registerMenuCommand("Set minimum rating…", () => {
+    const input = prompt(
+      "Hide sellers rated below what score out of 5?",
+      String(minRating)
+    );
+    if (input === null) return;
+
+    const parsed = Number(input.replace(",", "."));
+    if (!Number.isFinite(parsed)) return;
+
+    const next = Math.max(0, Math.min(5, Math.round(parsed * 10) / 10));
+
+    minRating = next;
+    GM_setValue("minRating", next);
+
+    location.reload();
+  });
+
+  GM_registerMenuCommand("Set minimum reviews…", () => {
+    const input = prompt(
+      "Hide sellers with fewer than how many reviews?",
+      String(minReviews)
+    );
+    if (input === null) return;
+
+    const parsed = Number(input);
+    if (!Number.isFinite(parsed)) return;
+
+    const next = Math.max(0, Math.min(10_000, Math.round(parsed)));
+
+    minReviews = next;
+    GM_setValue("minReviews", next);
 
     location.reload();
   });
@@ -229,10 +268,10 @@
 
         const ratingOk =
           rating !== null &&
-          rating >= MIN_RATING;
+          rating >= minRating;
 
         const reviewsOk =
-          reviewCount >= MIN_REVIEWS;
+          reviewCount >= minReviews;
 
         const hide =
           !ageOk ||
