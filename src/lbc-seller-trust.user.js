@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LBC Seller-Trust Filter
 // @namespace    https://github.com/gushmazuko
-// @version      1.4.0
-// @description  Hides Leboncoin ads from young, poorly rated or unrated sellers
+// @version      1.5.0
+// @description  Hides Leboncoin ads from young, poorly rated or low-review sellers and removes advertisements
 // @match        https://www.leboncoin.fr/*
 // @run-at       document-idle
 // @grant        GM_getValue
@@ -21,6 +21,7 @@
   const MAX_CONCURRENT = 4;
 
   const CARD_SELECTOR = '[data-qa-id="aditem_container"]';
+  const AD_SELECTOR = "#video-listing";
 
   const MIN_RATING = 4.5;
   const MIN_REVIEWS = 3;
@@ -200,7 +201,29 @@
 
   function hideCard(card) {
     if (!card.isConnected) return;
+
+    const item = card.closest('li[class*="styles_adCard"]') || card.closest("li");
+
+    if (item) {
+      item.style.display = "none";
+      return;
+    }
+
     card.style.display = "none";
+  }
+
+  function hideAdvertisement(node) {
+    const ad = node.matches?.(AD_SELECTOR)
+      ? node
+      : node.querySelector?.(AD_SELECTOR);
+
+    if (!ad) return;
+
+    const item = ad.closest("li");
+
+    if (item) {
+      item.style.display = "none";
+    }
   }
 
   const seen = new WeakSet();
@@ -231,6 +254,7 @@
 
   function processAllAds() {
     document.querySelectorAll(CARD_SELECTOR).forEach(processNode);
+    document.querySelectorAll(AD_SELECTOR).forEach(hideAdvertisement);
   }
 
   processAllAds();
@@ -239,8 +263,12 @@
     muts.forEach(m => {
       m.addedNodes.forEach(n => {
         if (n.nodeType !== 1) return;
+
         if (n.matches?.(CARD_SELECTOR)) processNode(n);
         n.querySelectorAll?.(CARD_SELECTOR).forEach(processNode);
+
+        hideAdvertisement(n);
+        n.querySelectorAll?.(AD_SELECTOR).forEach(hideAdvertisement);
       });
     });
   }).observe(document.body, { childList: true, subtree: true });
