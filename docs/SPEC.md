@@ -1,6 +1,6 @@
 # LBC Seller-Trust Filter — Userscript Specification
 
-**Version:** 1.7.0
+**Version:** 1.8.0
 **Target platform:** Tampermonkey (Chrome, Firefox, Edge, Safari)
 **Deliverable:** a single file, `src/lbc-seller-trust.user.js`
 
