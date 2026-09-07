@@ -21,7 +21,7 @@
   // ---------------------------------------------------------------------
   const MS_IN_DAY = 86_400_000;
   const MAX_CONCURRENT = 4;
-  const MIN_PRICES_FOR_CLASSIFICATION = 9;
+  const MIN_PRICES_FOR_CLASSIFICATION = 6;
 
   const CARD_SELECTOR = '[data-qa-id="aditem_container"]';
   const AD_LINK_SELECTOR = 'a[href*="/ad/"]';
