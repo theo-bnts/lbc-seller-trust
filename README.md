@@ -35,7 +35,7 @@ No badges or additional information are added to visible ads.
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) for your browser.
 2. Open the raw script and Tampermonkey will prompt to install it:
-   `https://github.com/gushmazuko/lbc-seller-trust/raw/main/src/lbc-seller-trust.user.js`
+   `https://github.com/theo-bnts/lbc-seller-trust/raw/main/src/lbc-seller-trust.user.js`
 
 ## Configuration
 
