@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         LBC Seller-Trust Filter
 // @namespace    https://github.com/gushmazuko
-// @version      1.5.0
-// @description  Hides Leboncoin ads from young, poorly rated or low-review sellers and removes advertisements
+// @version      1.6.0
+// @description  Hides Leboncoin ads from young, poorly rated or low-review sellers and removes sponsored content
 // @match        https://www.leboncoin.fr/*
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/gushmazuko/lbc-seller-trust/main/src/lbc-seller-trust.user.js
+// @downloadURL  https://raw.githubusercontent.com/gushmazuko/lbc-seller-trust/main/src/lbc-seller-trust.user.js
 // ==/UserScript==
 
 (function () {
@@ -21,10 +23,25 @@
   const MAX_CONCURRENT = 4;
 
   const CARD_SELECTOR = '[data-qa-id="aditem_container"]';
-  const AD_SELECTOR = "#video-listing";
+  const AD_LINK_SELECTOR = 'a[href*="/ad/"]';
+
+  const SELLER_HIDDEN_CLASS = "lbc-trust-seller-hidden";
+  const NON_LISTING_HIDDEN_CLASS = "lbc-trust-non-listing-hidden";
 
   const MIN_RATING = 4.5;
   const MIN_REVIEWS = 3;
+
+  // ---------------------------------------------------------------------
+  // Styles
+  // ---------------------------------------------------------------------
+  const style = document.createElement("style");
+  style.textContent = `
+    .${SELLER_HIDDEN_CLASS},
+    .${NON_LISTING_HIDDEN_CLASS} {
+      display: none !important;
+    }
+  `;
+  document.head.appendChild(style);
 
   // ---------------------------------------------------------------------
   // Settings
@@ -37,9 +54,12 @@
       String(monthsThreshold)
     );
     if (input === null) return;
+
     const next = Math.max(1, Math.min(36, Number(input) || monthsThreshold));
     monthsThreshold = next;
     GM_setValue("monthsThreshold", next);
+
+    location.reload();
   });
 
   // ---------------------------------------------------------------------
@@ -51,6 +71,7 @@
 
     function next() {
       if (queue.length === 0 || active >= limit) return;
+
       active++;
       const resolve = queue.shift();
       resolve();
@@ -73,7 +94,7 @@
   const evalSemaphore = createSemaphore(MAX_CONCURRENT);
 
   // ---------------------------------------------------------------------
-  // Trust engine — network + caching, no DOM
+  // Network helpers
   // ---------------------------------------------------------------------
   function blockedError(url, detail) {
     const err = new Error(`possibly blocked by anti-bot protection — ${url} (${detail})`);
@@ -90,11 +111,14 @@
       if (!looksJson || res.status === 403 || res.status === 429) {
         throw blockedError(url, `HTTP ${res.status}, content-type "${contentType}"`);
       }
+
       throw new Error(`${url} → HTTP ${res.status}`);
     }
+
     if (!looksJson) {
       throw blockedError(url, `unexpected content-type "${contentType}" on 200`);
     }
+
     try {
       return await res.json();
     } catch (err) {
@@ -110,20 +134,41 @@
   function logFetchFailure(err) {
     if (err && err.blocked) {
       blockedCount++;
+
       if (blockedCount === 1 || blockedCount % BLOCKED_LOG_EVERY === 0) {
         console.error(
           `[lbc-trust] possibly blocked by anti-bot protection (${blockedCount} occurrence${blockedCount > 1 ? "s" : ""} this session)`,
           err
         );
       }
-    } else {
-      console.warn("[lbc-trust]", err);
+
+      return;
     }
+
+    console.warn("[lbc-trust]", err);
   }
 
-  // Per-user memoised profile lookup: caching the promise gives in-flight
-  // dedupe for free. Failed lookups are evicted so a later retry can
-  // succeed instead of being stuck on a cached rejection.
+  // ---------------------------------------------------------------------
+  // Classified lookup — memoised by listing ID
+  // ---------------------------------------------------------------------
+  const classifiedCache = new Map(); // listId -> Promise<object>
+
+  function getClassified(listId) {
+    if (!classifiedCache.has(listId)) {
+      const promise = fetchJson(
+        `https://api.leboncoin.fr/finder/classified/${encodeURIComponent(listId)}`
+      );
+
+      promise.catch(() => classifiedCache.delete(listId));
+      classifiedCache.set(listId, promise);
+    }
+
+    return classifiedCache.get(listId);
+  }
+
+  // ---------------------------------------------------------------------
+  // Seller profile lookup — memoised by user ID
+  // ---------------------------------------------------------------------
   const userInfoCache = new Map(); // userId -> Promise<object>
 
   function getUserInfo(userId) {
@@ -131,31 +176,42 @@
       const promise = fetchJson(
         `https://api.leboncoin.fr/api/user-card/v1/${encodeURIComponent(userId)}/infos`
       );
+
       promise.catch(() => userInfoCache.delete(userId));
       userInfoCache.set(userId, promise);
     }
+
     return userInfoCache.get(userId);
   }
 
+  // ---------------------------------------------------------------------
+  // Seller evaluation
+  // ---------------------------------------------------------------------
   function computeAgeOk(registeredAt) {
     const registeredMs = Date.parse(registeredAt);
+
     if (Number.isNaN(registeredMs)) {
       throw new Error(`unparseable registered_at: ${registeredAt}`);
     }
+
     return Date.now() - registeredMs >= monthsThreshold * 30.4375 * MS_IN_DAY;
   }
 
   const verdictCache = new Map(); // userId -> { hide }
   const inFlight = new Map(); // userId -> Promise<{ hide }>
 
-  function evaluateSeller({ userId }) {
-    const key = userId;
+  function evaluateSeller(userId) {
+    if (verdictCache.has(userId)) {
+      return Promise.resolve(verdictCache.get(userId));
+    }
 
-    if (verdictCache.has(key)) return Promise.resolve(verdictCache.get(key));
-    if (inFlight.has(key)) return inFlight.get(key);
+    if (inFlight.has(userId)) {
+      return inFlight.get(userId);
+    }
 
     const promise = (async () => {
       await evalSemaphore.acquire();
+
       try {
         const userInfo = await getUserInfo(userId);
         const ageOk = computeAgeOk(userInfo.registered_at);
@@ -171,105 +227,162 @@
           ? receivedCount
           : 0;
 
+        const ratingOk =
+          rating !== null &&
+          rating >= MIN_RATING;
+
+        const reviewsOk =
+          reviewCount >= MIN_REVIEWS;
+
         const hide =
           !ageOk ||
-          reviewCount < MIN_REVIEWS ||
-          (rating !== null && rating < MIN_RATING);
+          !ratingOk ||
+          !reviewsOk;
 
         const result = { hide };
-        verdictCache.set(key, result);
+        verdictCache.set(userId, result);
+
         return result;
       } catch (err) {
         logFetchFailure(err);
         return { hide: false }; // fail-open — not cached
       } finally {
         evalSemaphore.release();
-        inFlight.delete(key);
+        inFlight.delete(userId);
       }
     })();
 
-    inFlight.set(key, promise);
+    inFlight.set(userId, promise);
     return promise;
   }
 
   // ---------------------------------------------------------------------
-  // DOM layer — ad-card discovery and filtering
+  // DOM helpers
   // ---------------------------------------------------------------------
   function isSearchPage() {
     return location.pathname.startsWith("/recherche");
   }
 
-  function hideCard(card) {
+  function getCardItem(card) {
+    return card.closest('li[class*="styles_adCard"]') || card.closest("li") || card;
+  }
+
+  function setCardHidden(card, hidden) {
     if (!card.isConnected) return;
 
-    const item = card.closest('li[class*="styles_adCard"]') || card.closest("li");
-
-    if (item) {
-      item.style.display = "none";
-      return;
-    }
-
-    card.style.display = "none";
+    const item = getCardItem(card);
+    item.classList.toggle(SELLER_HIDDEN_CLASS, hidden);
   }
 
-  function hideAdvertisement(node) {
-    const ad = node.matches?.(AD_SELECTOR)
-      ? node
-      : node.querySelector?.(AD_SELECTOR);
-
-    if (!ad) return;
-
-    const item = ad.closest("li");
-
-    if (item) {
-      item.style.display = "none";
-    }
-  }
-
-  const seen = new WeakSet();
-
-  function processNode(card) {
+  // Leboncoin inserts several non-listing <li> elements between real ads:
+  // sponsored blocks, empty placeholders, video ads, logos, etc.
+  // Real classified items contain an "/ad/" link, so non-listing items can
+  // safely be removed from the result lists.
+  function filterNonListingItems() {
     if (!isSearchPage()) return;
-    if (seen.has(card)) return;
-    seen.add(card);
 
-    const link = card.querySelector("a[href*='/ad/']");
+    const lists = new Set();
+
+    document.querySelectorAll(CARD_SELECTOR).forEach(card => {
+      const list = card.closest("ul");
+
+      if (list) {
+        lists.add(list);
+      }
+    });
+
+    lists.forEach(list => {
+      Array.from(list.children).forEach(item => {
+        if (item.tagName !== "LI") return;
+
+        const isListing = Boolean(item.querySelector(AD_LINK_SELECTOR));
+
+        item.classList.toggle(
+          NON_LISTING_HIDDEN_CLASS,
+          !isListing
+        );
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Ad-card processing
+  // ---------------------------------------------------------------------
+  const processedCards = new WeakMap(); // card -> listId
+
+  async function processNode(card) {
+    if (!isSearchPage()) return;
+    if (!card.isConnected) return;
+
+    const link = card.querySelector(AD_LINK_SELECTOR);
     if (!link) return;
+
     const listId = link.pathname.split("/").pop();
     if (!/^\d+$/.test(listId)) return;
 
-    fetchJson(`https://api.leboncoin.fr/finder/classified/${listId}`)
-      .then(data => {
-        const { owner } = data;
-        if (!owner?.user_id) return;
+    // React may reuse an existing DOM node for another listing.
+    if (processedCards.get(card) === listId) return;
 
-        return evaluateSeller({ userId: owner.user_id }).then(
-          ({ hide }) => {
-            if (hide) hideCard(card);
-          }
-        );
-      })
-      .catch(logFetchFailure);
+    processedCards.set(card, listId);
+
+    // Clear a verdict that may belong to a previous listing rendered
+    // inside the same DOM node.
+    setCardHidden(card, false);
+
+    try {
+      const data = await getClassified(listId);
+      const userId = data.owner?.user_id;
+
+      if (!userId) return;
+
+      const { hide } = await evaluateSeller(userId);
+
+      // The card may have been reused while the API requests were running.
+      if (processedCards.get(card) !== listId) return;
+
+      setCardHidden(card, hide);
+    } catch (err) {
+      processedCards.delete(card);
+      logFetchFailure(err);
+    }
   }
 
   function processAllAds() {
+    if (!isSearchPage()) return;
+
     document.querySelectorAll(CARD_SELECTOR).forEach(processNode);
-    document.querySelectorAll(AD_SELECTOR).forEach(hideAdvertisement);
+    filterNonListingItems();
   }
 
+  // ---------------------------------------------------------------------
+  // Initial processing + dynamic result loading
+  // ---------------------------------------------------------------------
   processAllAds();
 
   new MutationObserver(muts => {
+    if (!isSearchPage()) return;
+
     muts.forEach(m => {
       m.addedNodes.forEach(n => {
         if (n.nodeType !== 1) return;
 
-        if (n.matches?.(CARD_SELECTOR)) processNode(n);
-        n.querySelectorAll?.(CARD_SELECTOR).forEach(processNode);
+        if (n.matches?.(CARD_SELECTOR)) {
+          processNode(n);
+        }
 
-        hideAdvertisement(n);
-        n.querySelectorAll?.(AD_SELECTOR).forEach(hideAdvertisement);
+        const parentCard = n.closest?.(CARD_SELECTOR);
+
+        if (parentCard) {
+          processNode(parentCard);
+        }
+
+        n.querySelectorAll?.(CARD_SELECTOR).forEach(processNode);
       });
     });
-  }).observe(document.body, { childList: true, subtree: true });
+
+    filterNonListingItems();
+  }).observe(document.body, {
+    childList: true,
+    subtree: true
+  });
 })();
