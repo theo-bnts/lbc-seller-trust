@@ -1,16 +1,14 @@
 // ==UserScript==
-// @name         LBC Seller-Trust Flag
+// @name         LBC Seller-Trust Filter
 // @namespace    https://github.com/gushmazuko
-// @version      1.3.0
-// @description  Flags Leboncoin ads from young sellers and displays seller ratings
+// @version      1.4.0
+// @description  Hides Leboncoin ads from young, poorly rated or unrated sellers
 // @match        https://www.leboncoin.fr/*
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @noframes
-// @updateURL    https://raw.githubusercontent.com/gushmazuko/lbc-seller-trust/main/src/lbc-seller-trust.user.js
-// @downloadURL  https://raw.githubusercontent.com/gushmazuko/lbc-seller-trust/main/src/lbc-seller-trust.user.js
 // ==/UserScript==
 
 (function () {
@@ -23,8 +21,9 @@
   const MAX_CONCURRENT = 4;
 
   const CARD_SELECTOR = '[data-qa-id="aditem_container"]';
-  const BADGE_CONTAINER_SELECTOR = ".mb-md.flex.items-center.gap-sm";
-  const PRICE_SELECTOR = 'p[data-test-id="price"]';
+
+  const MIN_RATING = 4.5;
+  const MIN_REVIEWS = 3;
 
   // ---------------------------------------------------------------------
   // Settings
@@ -33,7 +32,7 @@
 
   GM_registerMenuCommand("Set age threshold (months)…", () => {
     const input = prompt(
-      "Flag sellers registered less than how many months ago?",
+      "Hide sellers registered less than how many months ago?",
       String(monthsThreshold)
     );
     if (input === null) return;
@@ -43,7 +42,7 @@
   });
 
   // ---------------------------------------------------------------------
-  // Concurrency limiter — bounds burst API traffic (SPEC §5.6)
+  // Concurrency limiter — bounds burst API traffic
   // ---------------------------------------------------------------------
   function createSemaphore(limit) {
     let active = 0;
@@ -73,7 +72,7 @@
   const evalSemaphore = createSemaphore(MAX_CONCURRENT);
 
   // ---------------------------------------------------------------------
-  // Trust engine — network + caching, no DOM (SPEC §5)
+  // Trust engine — network + caching, no DOM
   // ---------------------------------------------------------------------
   function blockedError(url, detail) {
     const err = new Error(`possibly blocked by anti-bot protection — ${url} (${detail})`);
@@ -145,8 +144,8 @@
     return Date.now() - registeredMs >= monthsThreshold * 30.4375 * MS_IN_DAY;
   }
 
-  const verdictCache = new Map(); // userId -> { trusted, reasons, rating, reviewCount }
-  const inFlight = new Map(); // userId -> Promise<{ trusted, reasons, rating, reviewCount }>
+  const verdictCache = new Map(); // userId -> { hide }
+  const inFlight = new Map(); // userId -> Promise<{ hide }>
 
   function evaluateSeller({ userId }) {
     const key = userId;
@@ -171,25 +170,17 @@
           ? receivedCount
           : 0;
 
-        const reasons = [];
-        if (!ageOk) reasons.push("young");
+        const hide =
+          !ageOk ||
+          reviewCount < MIN_REVIEWS ||
+          (rating !== null && rating < MIN_RATING);
 
-        const result = {
-          trusted: reasons.length === 0,
-          reasons,
-          rating,
-          reviewCount
-        };
+        const result = { hide };
         verdictCache.set(key, result);
         return result;
       } catch (err) {
         logFetchFailure(err);
-        return {
-          trusted: true,
-          reasons: [],
-          rating: null,
-          reviewCount: 0
-        }; // fail-open — not cached, SPEC §5.5
+        return { hide: false }; // fail-open — not cached
       } finally {
         evalSemaphore.release();
         inFlight.delete(key);
@@ -201,75 +192,15 @@
   }
 
   // ---------------------------------------------------------------------
-  // DOM layer — ad-card discovery and badges (SPEC §6)
+  // DOM layer — ad-card discovery and filtering
   // ---------------------------------------------------------------------
   function isSearchPage() {
     return location.pathname.startsWith("/recherche");
   }
 
-  const REASON_LABEL = {
-    young: "new"
-  };
-
-  const REASON_TEXT = {
-    young: () => `new account (< ${monthsThreshold} months)`
-  };
-
-  function addBadge(card, reasons) {
+  function hideCard(card) {
     if (!card.isConnected) return;
-    if (card.querySelector(".lbc-no-trust")) return;
-
-    const badge = document.createElement("div");
-    badge.textContent = reasons.map(r => REASON_LABEL[r]).join(" + ");
-    badge.className = "lbc-no-trust";
-    badge.title = `Seller: ${reasons.map(r => REASON_TEXT[r]()).join(" and ")}`;
-    Object.assign(badge.style, {
-      color: "white",
-      background: "#c0392b",
-      fontSize: "12px",
-      padding: "2px 6px",
-      borderRadius: "4px",
-      display: "inline-block",
-      marginLeft: "4px"
-    });
-
-    const flexContainer = card.querySelector(BADGE_CONTAINER_SELECTOR);
-    if (flexContainer) {
-      flexContainer.appendChild(badge);
-      return;
-    }
-    const priceEl = card.querySelector(PRICE_SELECTOR) || card;
-    priceEl.appendChild(badge);
-  }
-
-  function addRating(card, rating, reviewCount) {
-    if (!card.isConnected) return;
-    if (rating === null) return;
-    if (card.querySelector(".lbc-seller-rating")) return;
-
-    const badge = document.createElement("div");
-    const formattedRating = rating.toFixed(1).replace(".", ",");
-    badge.textContent = `★ ${formattedRating}/5 (${reviewCount} avis)`;
-    badge.className = "lbc-seller-rating";
-    badge.title = `Seller rating: ${formattedRating}/5 from ${reviewCount} review${reviewCount > 1 ? "s" : ""}`;
-    Object.assign(badge.style, {
-      color: "#1a1a1a",
-      background: "#f2f2f2",
-      fontSize: "12px",
-      fontWeight: "600",
-      padding: "2px 6px",
-      borderRadius: "4px",
-      display: "inline-block",
-      marginLeft: "4px"
-    });
-
-    const flexContainer = card.querySelector(BADGE_CONTAINER_SELECTOR);
-    if (flexContainer) {
-      flexContainer.appendChild(badge);
-      return;
-    }
-    const priceEl = card.querySelector(PRICE_SELECTOR) || card;
-    priceEl.appendChild(badge);
+    card.style.display = "none";
   }
 
   const seen = new WeakSet();
@@ -290,10 +221,8 @@
         if (!owner?.user_id) return;
 
         return evaluateSeller({ userId: owner.user_id }).then(
-          ({ trusted, reasons, rating, reviewCount }) => {
-            addRating(card, rating, reviewCount);
-
-            if (!trusted) addBadge(card, reasons);
+          ({ hide }) => {
+            if (hide) hideCard(card);
           }
         );
       })
