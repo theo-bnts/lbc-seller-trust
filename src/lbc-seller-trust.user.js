@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LBC Seller-Trust Filter
-// @namespace    https://github.com/gushmazuko
-// @version      1.6.0
+// @namespace    https://github.com/theo-bnts
+// @version      1.7.0
 // @description  Hides Leboncoin ads from young, poorly rated or low-review sellers and removes sponsored content
 // @match        https://www.leboncoin.fr/*
 // @run-at       document-idle
@@ -9,8 +9,8 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @noframes
-// @updateURL    https://raw.githubusercontent.com/gushmazuko/lbc-seller-trust/main/src/lbc-seller-trust.user.js
-// @downloadURL  https://raw.githubusercontent.com/gushmazuko/lbc-seller-trust/main/src/lbc-seller-trust.user.js
+// @updateURL    https://raw.githubusercontent.com/theo-bnts/lbc-seller-trust/main/src/lbc-seller-trust.user.js
+// @downloadURL  https://raw.githubusercontent.com/theo-bnts/lbc-seller-trust/main/src/lbc-seller-trust.user.js
 // ==/UserScript==
 
 (function () {
