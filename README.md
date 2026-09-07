@@ -57,7 +57,7 @@ For example:
 Only listings that remain visible after seller filtering are included in the
 calculation.
 
-At least **9 visible listings with a valid price** are required. If there are not enough
+At least **6 visible listings with a valid price** are required. If there are not enough
 prices to make a useful comparison, no price indication is displayed.
 
 The calculation is local and does not require any additional API request.
