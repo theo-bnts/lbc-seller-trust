@@ -17,17 +17,19 @@ results.
 
 ## What it does
 
-On `leboncoin.fr` search pages, each ad card's seller is checked against three configurable
-signals:
+On `leboncoin.fr` search pages, each ad card's seller can be checked against three
+configurable signals:
 
 - **Account age** — seller must have been registered for at least a configurable number
-  of months (default 6).
+  of months (default **6**).
 - **Seller rating** — seller must have a rating of at least a configurable score
   (default **4.5 / 5**).
 - **Review count** — seller must have received at least a configurable number of reviews
   (default **3**).
 
-If any of these checks fail, the entire ad is hidden from the search results.
+If any enabled check fails, the entire ad is hidden from the search results.
+
+Each individual seller filter can be disabled by setting its threshold to `0`.
 
 The script also hides non-listing elements inserted into the results list, including
 sponsored blocks, video ads, empty placeholders, and similar promotional content.
@@ -44,16 +46,34 @@ No badges or additional information are added to visible ads.
 
 All seller-trust thresholds are editable from the Tampermonkey menu for the script:
 
-| Setting                     | Range    | Default |
-| --------------------------- | -------- | ------- |
-| Set age threshold (months)… | 1–36     | 6       |
-| Set minimum rating…         | 0–5      | 4.5     |
-| Set minimum reviews…        | 0–10,000 | 3       |
+| Setting                     | Range    | Default | `0` means |
+| --------------------------- | -------- | ------- | --------- |
+| Set age threshold (months)… | 0–36     | 6       | Disabled  |
+| Set minimum rating…         | 0–5      | 4.5     | Disabled  |
+| Set minimum reviews…        | 0–10,000 | 3       | Disabled  |
 
 The minimum rating can be configured in increments of `0.1`.
 
 Changing any setting reloads the page so all visible listings are evaluated again using
 the new thresholds.
+
+### Disabling individual filters
+
+Setting a threshold to `0` completely disables that check.
+
+For example:
+
+- `age = 0`, `rating = 4.5`, `reviews = 3`:
+  account age is ignored, but rating and review count are still checked.
+- `age = 6`, `rating = 0`, `reviews = 3`:
+  sellers without a rating are allowed as long as they meet the age and review
+  requirements.
+- `age = 6`, `rating = 4.5`, `reviews = 0`:
+  the number of reviews is ignored.
+- all three values set to `0`:
+  no seller is hidden based on profile trust signals.
+
+Sponsored and non-listing content is still removed regardless of these settings.
 
 ## How it works
 
@@ -72,12 +92,17 @@ it to a 5-star rating before applying the configured minimum rating threshold.
 Seller profile lookups and classified lookups are cached in memory for the current page
 session to avoid repeating the same API requests unnecessarily.
 
-Listings are hidden when:
+When enabled, listings are hidden if:
 
 - the seller account is newer than the configured age threshold;
 - the seller has fewer than the configured minimum number of reviews;
 - the seller rating is below the configured minimum rating;
-- or the seller rating is unavailable.
+- or the seller rating is unavailable while the rating filter is enabled.
+
+A filter whose threshold is set to `0` is skipped entirely.
+
+In particular, disabling the age filter also means an unavailable or invalid
+`registered_at` value does not affect the verdict.
 
 If an API request fails, the script fails open and leaves the listing visible.
 
